@@ -13,7 +13,12 @@ use image::{
     DynamicImage, GenericImageView as _, GrayAlphaImage, GrayImage, ImageBuffer, Pixel as _,
     Rgb32FImage, RgbImage, Rgba32FImage, RgbaImage,
 };
-use ndarray::{s, Array, ArrayD, Axis, ShapeError};
+use ndarray::{s, ArrayD, Axis, ShapeError};
+
+// Conditional imports
+#[cfg(not(target_arch = "wasm32"))]
+use ndarray::Array;
+#[cfg(not(target_arch = "wasm32"))]
 use ort::TensorValueType;
 
 use crate::Variant;
@@ -40,8 +45,13 @@ pub(super) struct ModelImage(pub(super) u32, pub(super) Variant, pub(super) Dyna
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Something went wrong during inference.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("onnx error: {0}")]
     Ort(#[from] ort::Error),
+
+    #[cfg(target_arch = "wasm32")]
+    #[error("wonnx error: {0}")]
+    Wonnx(#[from] wonnx::WonnxError),
 
     /// We were unable to make an `ndarray::Array` of the requested shape.
     #[error("shape error: {0}")]
@@ -60,6 +70,8 @@ pub enum Error {
     Resize(#[from] fast_image_resize::ResizeError),
 }
 
+// Native implementation using ort
+#[cfg(not(target_arch = "wasm32"))]
 impl TryFrom<ModelImage> for ort::Value<TensorValueType<f32>> {
     type Error = Error;
 
@@ -86,6 +98,53 @@ impl TryFrom<ModelImage> for ort::Value<TensorValueType<f32>> {
         array.swap_axes(2, 3);
         assert_eq!(array.shape(), &[1, 3, size as usize, size as usize]);
         Ok(ort::Value::from_array(&array)?)
+    }
+}
+
+/// Convert an ndarray::ArrayD<f32> in NCHW format to a DynamicImage (Rgb32FImage).
+pub fn array_to_image(array: ndarray::ArrayD<f32>) -> Result<DynamicImage, Error> {
+    // Expect shape [1, 3, H, W]
+    let shape = array.shape();
+    if shape.len() != 4 || shape[0] != 1 || shape[1] != 3 {
+        return Err(Error::InvalidShape);
+    }
+    let height = shape[2] as u32;
+    let width = shape[3] as u32;
+    let array = array
+        .into_dimensionality::<ndarray::Ix4>()
+        .map_err(|_| Error::InvalidShape)?;
+    let flat: Vec<f32> = array.iter().cloned().collect();
+    let img = Rgb32FImage::from_vec(width, height, flat).ok_or(Error::Image)?;
+    Ok(DynamicImage::ImageRgb32F(img))
+}
+
+impl TryFrom<ModelImage> for ndarray::ArrayD<f32> {
+    type Error = crate::image_processing::Error;
+
+    fn try_from(model_image: ModelImage) -> Result<Self, Self::Error> {
+        let ModelImage(size, variant, img) = model_image;
+ 
+        let (w, h, xpos, ypos) = center_crop_size_and_offset(variant, &img);
+        let options = ResizeOptions::new()
+            .crop(xpos as f64, ypos as f64, w as f64, h as f64)
+            .resize_alg(ResizeAlg::Interpolation(
+                fast_image_resize::FilterType::Bilinear,
+            ));
+        let modified_img = resize_img(&img, size, size, options)?;
+
+        let img = modified_img.into_rgb32f().into_vec();
+        let array = ndarray::Array::from(img);
+
+        // The `image` crate normalizes to `[0,1]`. Trustmark wants images normalized to `[-1,1]`.
+        let array = convert_from_0_1_to_neg1_1!(array);
+
+        let mut array = array
+            .to_shape([size as usize, size as usize, 3])?
+            .insert_axis(ndarray::Axis(3))
+            .reversed_axes();
+        array.swap_axes(2, 3);
+        assert_eq!(array.shape(), &[1, 3, size as usize, size as usize]);
+        Ok(array.into_owned().into_dyn())
     }
 }
 

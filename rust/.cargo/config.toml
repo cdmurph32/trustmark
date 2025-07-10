@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --package xtask --"
+
+[build]
+target = "wasm32-wasip2"
+
+[env]
+CC = "/opt/homebrew/opt/llvm/bin/clang"

@@ -7,7 +7,12 @@
 
 use std::{fmt::Display, str::FromStr};
 
-use ndarray::{Array1, ArrayD, Axis};
+use ndarray::{ArrayD, Axis};
+
+// Conditional imports
+#[cfg(not(target_arch = "wasm32"))]
+use ndarray::Array1;
+#[cfg(not(target_arch = "wasm32"))]
 use ort::{TensorValueType, Value};
 
 const VERSION_BITS: u16 = 4;
@@ -21,8 +26,13 @@ pub(super) struct Bits(String);
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Something went wrong while doing inference.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("onnx error: {0}")]
     Ort(#[from] ort::Error),
+
+    #[cfg(target_arch = "wasm32")]
+    #[error("wonnx error: {0}")]
+    Wonnx(#[from] wonnx::WonnxError),
 
     /// A character was encounted that was not a '0' or a '1'. Strings that specify bitstrings
     /// should only use these two characters.
@@ -212,6 +222,8 @@ impl Bits {
     }
 }
 
+// Native ort implementation
+#[cfg(not(target_arch = "wasm32"))]
 impl From<Bits> for ort::Value<TensorValueType<f32>> {
     fn from(Bits(s): Bits) -> Self {
         let floats: Vec<f32> = s
@@ -225,6 +237,20 @@ impl From<Bits> for ort::Value<TensorValueType<f32>> {
 
         let array = Array1::from(floats);
         Value::from_array(array.insert_axis(Axis(0))).unwrap()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<Bits> for ndarray::ArrayD<f32> {
+    fn from(bits: Bits) -> Self {
+        let floats: Vec<f32> = bits
+            .0
+            .chars()
+            .map(|c| if c == '1' { 1.0 } else { 0.0 })
+            .collect();
+        ndarray::Array::from_shape_vec(ndarray::IxDyn(&[1, 100]), floats)
+            .expect("Bits length should be 100")
+            .into_dyn()
     }
 }
 
@@ -243,6 +269,30 @@ impl TryFrom<ArrayD<f32>> for Bits {
         }
 
         Bits::new(s)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl TryFrom<wonnx::utils::OutputTensor> for Bits {
+    type Error = Error;
+
+    fn try_from(tensor: wonnx::utils::OutputTensor) -> Result<Self, Self::Error> {
+        match tensor {
+            wonnx::utils::OutputTensor::F32(vec) => {
+                if vec.len() != 100 {
+                    return Err(Error::InvalidDim);
+                }
+
+                let mut s = String::new();
+                for bit in vec.iter() {
+                    let c = if *bit < 0.5 { '0' } else { '1' };
+                    s.push(c);
+                }
+
+                Bits::new(s)
+            }
+            _ => Err(Error::InvalidDim),
+        }
     }
 }
 

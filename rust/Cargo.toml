@@ -29,8 +29,14 @@ harness = false
 image = "0.25.6"
 fast_image_resize = { version = "5.1.4", features = ["image", "rayon"] }
 ndarray = "0.16"
-ort = "=2.0.0-rc.8"
 thiserror = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ort = "=2.0.0-rc.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+pollster = "0.3"
+wonnx = { git = "https://github.com/wasi-gfx/wonnx.git", rev = "8db2f9d5c5a45d4421f37dc3c2b4f57d1090b377" }
 
 [dev-dependencies]
 criterion = "0.5"
